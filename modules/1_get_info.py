@@ -5,191 +5,147 @@ import json
 import time
 
 
-def scrape_specs(page):
-    # Scroll so specs load (Brain.com.ua lazy loads them)
-    page.evaluate("window.scrollBy(0, document.body.scrollHeight)")
-    
-    # Wait until specification blocks appear
-    page.wait_for_selector(".br-pr-chr-item", timeout=5000)
+def get_text(page, xpath):
+    try:
+        el = page.query_selector(f"xpath={xpath}")
+        if not el:
+            return None
+        return el.inner_text().strip()
+    except:
+        return None
 
-    specific_s = {}
-    spec_blocks = page.query_selector_all(".br-pr-chr-item")
 
-    for block in spec_blocks:
-        # Get block title (e.g. "Процесор", "Пам'ять")
-        spec_name_el = block.query_selector("h3")
-        if not spec_name_el:
+def get_product(page, search_str):
+    product = {}
+
+
+    # OPEN SITE
+    page.goto("https://brain.com.ua", wait_until="domcontentloaded")
+
+    # SEARCH PRODUCT — Selenium-style logic in Playwright
+    search_boxes = page.locator("xpath=//input[@class='quick-search-input']")
+    count = search_boxes.count()
+
+    print("Found inputs:", count)
+
+    for i in range(count):
+        box = search_boxes.nth(i)
+        print(f"Trying input #{i+1}")
+
+        try:
+            # Try to fill
+            box.fill(search_str)
+
+            # Try pressing Enter
+            box.press("Enter")
+
+            print(f"Input #{i+1} worked!")
+            break
+
+        except Exception as e:
+            print(f"Input #{i+1} FAILED → {type(e).__name__}")
             continue
 
-        spec_name = spec_name_el.inner_text().strip()
-        specific_s[spec_name] = {}
+    page.wait_for_selector("xpath=//div[contains(@class,'br-pp-img-grid')]", timeout=10000)
 
-        # Each specification row is inside div > div
-        rows = block.query_selector_all("div > div")
+    # Click first product
+    page.query_selector("xpath=(//div[contains(@class,'br-pp-img-grid')])[1]").click()
+
+    page.wait_for_selector("xpath=//h1[contains(@class,'main-title')]", timeout=10000)
+
+    # PRODUCT BASIC INFO (XPATH)
+
+    product["full_name"] = get_text(page, "//h1[contains(@class,'main-title')]")
+    product["color"] = get_text(page, "//a[contains(@title,'Колір')]")
+    product["memory_volume"] = get_text(page, "//a[contains(@title,'Вбудована пам')]")
+    product["price_use"] = get_text(page, "//div[contains(@class,'main-price-block')]")
+    product["price_action"] = None
+
+    # IMAGES
+    try:
+        imgs = page.query_selector_all("xpath=//img[contains(@class,'br-main-img')]")
+        product["picture_urls"] = [img.get_attribute("src") for img in imgs]
+    except:
+        product["picture_urls"] = []
+
+    # OTHER FIELDS
+    product["product_code"] = get_text(page, "//span[contains(@class,'br-pr-code-val')]")
+    product["review_count"] = get_text(page, "//a[contains(@class,'forbid-click')]/span")
+    product["series"] = get_text(page, "//span[text()='Модель']/following-sibling::span")
+    product["display_size"] = get_text(page, "//span[text()='Діагональ екрану']/following-sibling::span")
+    product["resolution"] = get_text(page, "//span[text()='Роздільна здатність екрану']/following-sibling::span")
+
+    # SCROLL TO LOAD SPECS
+    page.evaluate("window.scrollBy(0, document.body.scrollHeight)")
+    page.wait_for_selector("xpath=//div[contains(@class,'br-pr-chr-item')]", timeout=10000)
+
+    # SPECIFICATIONS (XPATH ONLY)
+    specs = {}
+
+    spec_blocks = page.query_selector_all("xpath=//div[contains(@class,'br-pr-chr-item')]")
+
+    for block in spec_blocks:
+        # Get block title
+        h3 = block.query_selector("xpath=.//h3")
+        if not h3:
+            continue
+        spec_name = h3.inner_text().strip()
+        specs[spec_name] = {}
+
+        # Rows inside block
+        rows = block.query_selector_all("xpath=.//div/div")
 
         for row in rows:
-            spans = row.query_selector_all("span")
+            spans = row.query_selector_all("xpath=.//span")
             if len(spans) < 2:
                 continue
 
             key = spans[0].inner_text().strip()
 
-            # Value may contain a link
-            link = spans[1].query_selector("a")
+            link = spans[1].query_selector("xpath=.//a")
             if link:
                 value = link.inner_text().strip()
             else:
                 value = spans[1].inner_text().strip()
 
-            specific_s[spec_name][key] = value
+            specs[spec_name][key] = value
 
-    return json.dumps(specific_s, indent=4, ensure_ascii=False)
+    product["specifications"] = json.dumps(specs, indent=4, ensure_ascii=False)
 
-product = {}
+    return product
 
+
+# MAIN SCRIPT
 with sync_playwright() as p:
     browser = p.chromium.launch(headless=False)
     context = browser.new_context(permissions=[])
     page = context.new_page()
 
-    page.goto("https://brain.com.ua")
-    print("sleep")
-    time.sleep(30)
-
     search_str = "Apple iPhone 15 128GB Black"
-
-    # # Search input -- dosnt work
-    # page.click("input.quick-search-input")
-    # page.keyboard.type(search_str, delay=50)
-    # page.keyboard.press("Enter")
-
-    page.evaluate(f"""
-                    const el = document.querySelector('input.quick-search-input');
-                    el.focus();
-                    el.value = '{search_str}';
-                    el.dispatchEvent(new Event('input', {{ bubbles: true }}));
-                    document.querySelector('input[type="submit"]').click();
-                """)
-    print("sleep2")
-    time.sleep(20)
-
-    # Wait for product list
-    page.wait_for_selector(".view-grid .br-pp-img-grid a")
-
-    # Click first product
-    qrid_elements = page.query_selector_all(".view-grid .br-pp-img-grid a")
-    qrid_elements[0].click()
-
-    page.wait_for_selector("h1.main-title")
-
-
-    # ========================
-    # START SCRAPING
-    # ========================
-
-    # FULL NAME
-    try:
-        product["full_name"] = page.inner_text("h1.main-title").strip()
-    except:
-        product["full_name"] = None
-
-    # COLOR
-    try:
-        color = page.get_attribute('a[title^="Колір"]', "title")
-        product["color"] = color.replace("Колір", "").strip()
-    except:
-        product["color"] = None
-
-    # MEMORY VOLUME
-    try:
-        mem = page.get_attribute('a[title^="Вбудована пам\'ять"]', "title")
-        product["memory_volume"] = mem.replace("Вбудована пам'ять", "").strip()
-    except:
-        product["memory_volume"] = None
-
-    # PRICE
-    try:
-        product["price_use"] = page.inner_text(".price-wrapper span").strip()
-    except:
-        product["price_use"] = None
-
-    product["price_action"] = None
-
-    # IMAGES
-    try:
-        image_elements = page.query_selector_all("img.br-main-img")
-        product["picture_urls"] = [img.get_attribute("src") for img in image_elements]
-    except:
-        product["picture_urls"] = []
-
-    # PRODUCT CODE
-    try:
-        product["product_code"] = page.inner_text("span.br-pr-code-val").strip()
-    except:
-        product["product_code"] = None
-
-    # REVIEW COUNT
-    try:
-        product["review_count"] = page.inner_text("a.forbid-click span").strip()
-    except:
-        product["review_count"] = None
-
-    # SERIES
-    product["series"] = None
-    try:
-        blocks = page.query_selector_all("div.br-pr-chr-item")
-        for block in blocks:
-            spans = block.query_selector_all("span")
-            span_texts = [s.inner_text().strip() for s in spans]
-
-            for i in range(len(span_texts) - 1):
-                if span_texts[i] == "Модель":
-                    product["series"] = span_texts[i + 1]
-                    break
-    except:
-        pass
-
-    # DISPLAY SIZE
-    try:
-        ds = page.get_attribute('a[title^="Діагональ екрану"]', "title")
-        product["display_size"] = ds.replace("Діагональ екрану", "").strip()
-    except:
-        product["display_size"] = None
-
-    # RESOLUTION
-    try:
-        rs = page.get_attribute('a[title^="Роздільна здатність екрану"]', "title")
-        product["resolution"] = rs.replace("Роздільна здатність екрану", "").strip()
-    except:
-        product["resolution"] = None
-
-    product["specifications"] = scrape_specs(page)
-
-    print("\n======= PRODUCT DATA =======")
-    for k, v in product.items():
-        print(k, ":", v)
+    product = get_product(page, search_str)
 
     browser.close()
 
-    # SAVE TO DB
-    try:
-        gadget, created = MobileGadget.objects.get_or_create(
-            full_name=product['full_name'],
-            color=product['color'],
-            memory_volume=product['memory_volume'],
-            price_use=product['price_use'],
-            price_action=product['price_action'],
-            pic_links=product['picture_urls'],
-            product_code=product["product_code"],
-            review_count=product['review_count'],
-            series=product['series'],
-            display_size=product['display_size'],
-            resolution=product['resolution'],
-            specifications=product['specifications']
-        )
-        print("Saved new gadget" if created else "Gadget already exists")
+# PRINT RESULTS
+for key, val in product.items():
+    print(f"{key}: {val}")
 
-    except Exception as e:
-        print("Database error:", e)
-
-
+# SAVE TO DB
+try:
+    gadget, created = MobileGadget.objects.get_or_create(
+        full_name=product['full_name'],
+        color=product['color'],
+        memory_volume=product['memory_volume'],
+        price_use=product['price_use'],
+        price_action=product['price_action'],
+        pic_links=product['picture_urls'],
+        product_code=product["product_code"],
+        review_count=product['review_count'],
+        series=product['series'],
+        display_size=product['display_size'],
+        resolution=product['resolution'],
+        specifications=product['specifications']
+    )
+    print("New gadget saved." if created else "Gadget already exists.")
+except Exception as e:
+    print("Database error:", e)
